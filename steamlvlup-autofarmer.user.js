@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SteamLvlUp Puzzle Box Full-Auto Farmer Pro
 // @namespace    https://steamlvlup.com/
-// @version      1.1.0
+// @version      1.2.0
 // @description  Полный автофарм PuzzleBox: пуленепробиваемый захват p5, настраиваемое время выдержки из UI, честная победа через checkGameEnd и авто-выход
 // @author       Antigravity
 // @match        https://steamlvlup.com/giveaways*
@@ -695,10 +695,180 @@
         return { keyword: rawKw, ru: cachedRu };
     }
 
+    let favQuestInProgress = false;
+
+    function findWeeklyFavoriteQuest() {
+        const holders = document.querySelectorAll('.gw-quests[data-type="weekly"] .gw-quest-holder');
+        for (const holder of holders) {
+            const infoText = holder.querySelector('.gw-quest-info span')?.innerText?.trim() || '';
+            if (/избранн|favorite/i.test(infoText)) {
+                const waitBtn = holder.querySelector('.q-b-wait');
+                const refreshBtn = holder.querySelector('.refresh-task');
+                const questId = refreshBtn?.getAttribute('data-quest');
+                if (waitBtn && questId && !holder.dataset.afFavProcessed) {
+                    const m = infoText.match(/(\d+)/);
+                    const targetCount = m ? parseInt(m[1], 10) : 30;
+                    return { holder, questId, targetCount, infoText };
+                }
+            }
+        }
+        return null;
+    }
+
+    async function runWeeklyFavoriteQuest(favQuest) {
+        if (favQuestInProgress) return;
+        favQuestInProgress = true;
+        const { holder, questId, targetCount } = favQuest;
+        holder.dataset.afFavProcessed = '1';
+
+        const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+        const ajaxPost = (url, data) => new Promise(resolve => {
+            if (typeof window.$ === 'function' && window.$.ajax) {
+                window.$.ajax({
+                    url,
+                    type: 'POST',
+                    headers: { 'X-CSRF-TOKEN': csrf },
+                    data,
+                    success: d => resolve(d),
+                    error: () => resolve(null)
+                });
+            } else {
+                const body = new URLSearchParams(data).toString();
+                fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                        'X-CSRF-TOKEN': csrf,
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body
+                }).then(r => r.json()).then(resolve).catch(() => resolve(null));
+            }
+        });
+
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        const addedItems = [];
+
+        try {
+            const weeklyTab = document.querySelector('.gw-context-menu div[data-quests="weekly"]');
+            if (weeklyTab && !weeklyTab.classList.contains('gw-page-active')) weeklyTab.click();
+
+            let st = getState();
+            st.status = `⭐ Загружаем список наборов из Магазина (https://steamlvlup.com/)...`;
+            saveState(st);
+            updateUI(st);
+
+            let candidates = [];
+            for (let page = 0; page < 3 && candidates.length < targetCount; page++) {
+                const storeData = await ajaxPost('/store/load', {
+                    hide_exist: false,
+                    page,
+                    page_size: 100,
+                    sort_by: 'sold',
+                    sort_type: 'desc'
+                });
+                if (storeData && storeData.success && Array.isArray(storeData.items)) {
+                    for (const item of storeData.items) {
+                        if (!item.fav && candidates.length < targetCount) {
+                            candidates.push({ appid: item.appid, border: item.border });
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            if (candidates.length === 0) {
+                console.warn('[AutoFarmer] Не удалось получить список наборов из /store/load');
+                return;
+            }
+
+            // 1. Отмечаем N наборов в избранное
+            for (let i = 0; i < candidates.length; i++) {
+                const item = candidates[i];
+                await ajaxPost('/store/fav', { appid: item.appid, border: item.border, type: 1 });
+                addedItems.push(item);
+
+                const pbPie = holder.querySelector('.pb-pie');
+                if (pbPie) pbPie.setAttribute('data-progress', `${i + 1} / ${targetCount}`);
+                const pieEl = holder.querySelector('.pie');
+                if (pieEl) {
+                    const pct = Math.min(100, Math.round(((i + 1) / targetCount) * 100));
+                    pieEl.style.setProperty('--p', String(pct));
+                    pieEl.innerText = ` ${pct}%`;
+                }
+
+                st = getState();
+                st.status = `⭐ Добавляем в избранное: ${i + 1}/${candidates.length}...`;
+                saveState(st);
+                updateUI(st);
+                await sleep(110);
+            }
+
+            // 2. Получаем награду за выполненное задание
+            st = getState();
+            st.status = `🎁 Забираем награду за «Добавьте в избранное ${targetCount} наборов»...`;
+            saveState(st);
+            updateUI(st);
+            await sleep(400);
+
+            const claimRes = await ajaxPost('/giveaway/quest/get', { id: questId });
+            if (claimRes && claimRes.success) {
+                if (typeof window.changeBalances === 'function') {
+                    window.changeBalances(claimRes.amount, 'points');
+                }
+                const waitBtn = holder.querySelector('.q-b-wait');
+                if (waitBtn) {
+                    waitBtn.classList.remove('q-b-wait');
+                    waitBtn.classList.add('q-b-done');
+                    waitBtn.setAttribute('data-quest', questId);
+                    waitBtn.innerHTML = `Получено`;
+                }
+            }
+
+            await sleep(500);
+
+            // 3. Заменяем задачу, если доступны замены
+            const refreshCountEl = document.querySelector('#balanceTrefresh b');
+            const refreshAvailable = refreshCountEl ? (parseInt(refreshCountEl.innerText.trim()) || 0) : 0;
+            if (refreshAvailable > 0) {
+                st = getState();
+                st.status = `🔄 Заменяем задачу про избранное (доступно замен: ${refreshAvailable})...`;
+                saveState(st);
+                updateUI(st);
+
+                if (typeof window.refreshTask === 'function') {
+                    window.refreshTask(questId);
+                } else {
+                    await ajaxPost('/giveaway/quest/refresh', { id: questId });
+                }
+                await sleep(1200);
+            }
+        } catch (err) {
+            console.warn('[AutoFarmer] Ошибка при выполнении квеста с избранным:', err);
+        } finally {
+            // 4. Удаляем все добавленные наборы обратно из избранного
+            for (let i = 0; i < addedItems.length; i++) {
+                const item = addedItems[i];
+                await ajaxPost('/store/fav', { appid: item.appid, border: item.border, type: 0 });
+                const st = getState();
+                st.status = `🧹 Удаляем наборы из избранного: ${i + 1}/${addedItems.length}...`;
+                saveState(st);
+                updateUI(st);
+                await sleep(110);
+            }
+            lastDailyActionAt = Date.now();
+            favQuestInProgress = false;
+        }
+    }
+
     // Возвращает true, если сейчас выполняется шаг ежедневных заданий или открыта капча
     function processDailyTasksAndGiveaways(state) {
         const now = Date.now();
         const capInfo = enhanceCaptchaModal(state);
+
+        // Если уже выполняется авто-квест с добавлением 30 наборов в избранное — ждём завершения
+        if (favQuestInProgress) return true;
 
         // Если открыта модалка капчи — ждём её решения (вручную или через ИИ)
         const capModal = document.querySelector('.slvlup-capcha-modal');
@@ -711,34 +881,111 @@
             return true;
         }
 
-        const shouldRun = state.dailyTasksActive || (state.active && state.autoDailyBeforeFarm && !state.dailyTasksDoneInSession);
+        const favQuest = findWeeklyFavoriteQuest();
+        const hasPendingWeeklyOrGlobal = !!(
+            favQuest ||
+            document.querySelector('.gw-quests[data-type="weekly"] .q-b-get') ||
+            document.querySelector('.gw-quests[data-type="global"] .q-b-get') ||
+            document.querySelector('.refresh-task-accept') ||
+            ((parseInt(document.querySelector('#balanceTrefresh b')?.innerText?.trim()) || 0) > 0 &&
+                Array.from(document.querySelectorAll('.gw-quests[data-type="weekly"] .gw-quest-progress'))
+                    .some(prog => prog.querySelector('.q-b-done:not(.refresh-task)') && prog.querySelector('.refresh-task')))
+        );
+
+        const shouldRun = state.dailyTasksActive || (state.active && state.autoDailyBeforeFarm && (!state.dailyTasksDoneInSession || hasPendingWeeklyOrGlobal));
         if (!shouldRun) return false;
 
-        // 1. Активируем вкладку Ежедневные задания (data-quests="daily")
-        const dailyTab = document.querySelector('.gw-context-menu div[data-quests="daily"]');
-        if (dailyTab && !dailyTab.classList.contains('gw-page-active')) {
-            dailyTab.click();
-        }
-
-        // 2. Квест "Посетите страницу Розыгрышей" (quest_dl_advanced) — забирается в 1 клик без капчи
-        const advQuestBtn = document.querySelector('.gw-quests[data-type="daily"] .q-b-get[data-type="quest_dl_advanced"]');
-        if (advQuestBtn) {
-            if (now - lastDailyActionAt < 3000) return true;
+        // 0. Если открыта модалка подтверждения замены еженедельного задания — подтверждаем
+        const refreshAcceptBtn = document.querySelector('.refresh-task-accept');
+        if (refreshAcceptBtn && refreshAcceptBtn.offsetParent !== null) {
+            if (now - lastDailyActionAt < 1200) return true;
             lastDailyActionAt = now;
-            state.status = '🎁 Забираем квест «Посетите страницу Розыгрышей» (+500 монет)...';
+            state.status = '🔄 Подтверждаем замену выполненного задания...';
             saveState(state);
-            advQuestBtn.click();
+            refreshAcceptBtn.click();
             return true;
         }
 
-        // 3. Квест "Пройдите проверку капчи" (quest_dl_capcha)
+        // 1. Вкладка «Ежедневные Задания» (data-quests="daily")
+        const dailyClaimBtn = document.querySelector('.gw-quests[data-type="daily"] .q-b-get:not([data-type="quest_dl_capcha"])');
+        if (dailyClaimBtn) {
+            const dailyTab = document.querySelector('.gw-context-menu div[data-quests="daily"]');
+            if (dailyTab && !dailyTab.classList.contains('gw-page-active')) dailyTab.click();
+            if (now - lastDailyActionAt < 2500) return true;
+            lastDailyActionAt = now;
+            const qTitle = dailyClaimBtn.closest('.gw-quest-holder')?.querySelector('.gw-quest-info span')?.innerText?.trim() || 'Ежедневное задание';
+            state.status = `🎁 Забираем: «${qTitle}»...`;
+            saveState(state);
+            dailyClaimBtn.click();
+            return true;
+        }
+
         const capQuestBtn = document.querySelector('.gw-quests[data-type="daily"] .q-b-get[data-type="quest_dl_capcha"]');
         if (capQuestBtn) {
+            const dailyTab = document.querySelector('.gw-context-menu div[data-quests="daily"]');
+            if (dailyTab && !dailyTab.classList.contains('gw-page-active')) dailyTab.click();
             if (now - lastDailyActionAt < 3500) return true;
             lastDailyActionAt = now;
             state.status = '🎁 Открываем квест «Пройдите проверку капчи» (+300 монет)...';
             saveState(state);
             capQuestBtn.click();
+            return true;
+        }
+
+        // 2. Вкладка «Еженедельные Задания» (data-quests="weekly") — сбор наград, авто-квест с избранным и замена выполненных задач
+        if (favQuest) {
+            runWeeklyFavoriteQuest(favQuest);
+            return true;
+        }
+
+        const weeklyClaimBtn = document.querySelector('.gw-quests[data-type="weekly"] .q-b-get');
+        if (weeklyClaimBtn) {
+            const weeklyTab = document.querySelector('.gw-context-menu div[data-quests="weekly"]');
+            if (weeklyTab && !weeklyTab.classList.contains('gw-page-active')) weeklyTab.click();
+            if (now - lastDailyActionAt < 2500) return true;
+            lastDailyActionAt = now;
+            const qTitle = weeklyClaimBtn.closest('.gw-quest-holder')?.querySelector('.gw-quest-info span')?.innerText?.trim() || 'Еженедельное задание';
+            state.status = `🎁 Забираем еженедельное задание: «${qTitle}»...`;
+            saveState(state);
+            weeklyClaimBtn.click();
+            return true;
+        }
+
+        const refreshCountEl = document.querySelector('#balanceTrefresh b');
+        const refreshAvailable = refreshCountEl ? (parseInt(refreshCountEl.innerText.trim()) || 0) : 0;
+        if (refreshAvailable > 0) {
+            const completedWeeklyRefreshBtn = Array.from(
+                document.querySelectorAll('.gw-quests[data-type="weekly"] .gw-quest-progress')
+            ).find(prog => prog.querySelector('.q-b-done:not(.refresh-task)') && prog.querySelector('.refresh-task'))
+             ?.querySelector('.refresh-task');
+
+            if (completedWeeklyRefreshBtn) {
+                const weeklyTab = document.querySelector('.gw-context-menu div[data-quests="weekly"]');
+                if (weeklyTab && !weeklyTab.classList.contains('gw-page-active')) weeklyTab.click();
+                if (now - lastDailyActionAt < 2500) return true;
+                lastDailyActionAt = now;
+                state.status = `🔄 Заменяем выполненное еженедельное задание (доступно замен: ${refreshAvailable})...`;
+                saveState(state);
+                completedWeeklyRefreshBtn.click();
+                setTimeout(() => {
+                    const acceptBtn = document.querySelector('.refresh-task-accept');
+                    if (acceptBtn) acceptBtn.click();
+                }, 400);
+                return true;
+            }
+        }
+
+        // 3. Вкладка «Постоянные Задачи» (data-quests="global")
+        const globalClaimBtn = document.querySelector('.gw-quests[data-type="global"] .q-b-get');
+        if (globalClaimBtn) {
+            const globalTab = document.querySelector('.gw-context-menu div[data-quests="global"]');
+            if (globalTab && !globalTab.classList.contains('gw-page-active')) globalTab.click();
+            if (now - lastDailyActionAt < 2500) return true;
+            lastDailyActionAt = now;
+            const qTitle = globalClaimBtn.closest('.gw-quest-holder')?.querySelector('.gw-quest-info span')?.innerText?.trim() || 'Постоянная задача';
+            state.status = `🎁 Забираем постоянную задачу: «${qTitle}»...`;
+            saveState(state);
+            globalClaimBtn.click();
             return true;
         }
 
@@ -1168,7 +1415,7 @@
         div.innerHTML = `
             <div id="af-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; cursor: move; border-bottom: 1px solid #333; padding-bottom: 6px;">
                 <div style="font-weight: bold; color: #5865f2; display: flex; align-items: center; gap: 6px;">
-                    <span>🧩 Full-Auto Farmer v1.1.0</span>
+                    <span>🧩 Full-Auto Farmer v1.2.0</span>
                 </div>
                 <button id="af-toggle" style="background: none; border: none; color: #888; font-size: 11px; cursor: pointer;">[Скрыть]</button>
             </div>
