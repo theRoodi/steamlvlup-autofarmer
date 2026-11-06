@@ -1,0 +1,13 @@
+# Временные файлы отладки, архивы и профили браузеров
+_archive/
+chrome_user_data/
+chrome-profile/
+dev_chrome/
+dev_profile/
+edge_dev_profile/
+isolated_profile/
+node_modules/
+package.json
+package-lock.json
+start_debug_chrome.bat
+*.log
