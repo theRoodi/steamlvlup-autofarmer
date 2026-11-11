@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SteamLvlUp Puzzle Box Full-Auto Farmer Pro
 // @namespace    https://steamlvlup.com/
-// @version      1.2.0
-// @description  Полный автофарм PuzzleBox: пуленепробиваемый захват p5, настраиваемое время выдержки из UI, честная победа через checkGameEnd и авто-выход
+// @version      1.3.0
+// @description  Полный автофарм PuzzleBox: игра по числу билетов, гибкий сбор задач и розыгрышей, помощник капчи и обновлённый UI
 // @author       Antigravity
 // @match        https://steamlvlup.com/giveaways*
 // @grant        none
@@ -30,17 +30,20 @@
         return {
             active: false,
             dailyTasksActive: false,
+            doQuests: true,          // Выполнять сбор задач (Daily / Weekly / Global)
+            doGiveaways: true,       // Вступать в розыгрыши (Ежедневный / Еженедельный)
             autoDailyBeforeFarm: true,
             dailyTasksDoneInSession: false,
             geminiApiKey: '',
+            useAllTickets: false,    // Играть, пока не закончатся билеты
             completed: 0,
             totalGames: 2,
-            diff: 2,             // 0 = Легкая, 1 = Средняя, 2 = Сложная
-            minTime: 240,        // Случайная выдержка от (сек)
-            maxTime: 260,        // Случайная выдержка до (сек)
-            diffWaitSec: 10,     // Ожидание перед выбором сложности (сек)
-            boardWaitSec: 10,    // Ожидание прогрузки стола и кусочков (сек)
-            exitWaitSec: 7,      // Ожидание появления кнопки "Выход" (сек)
+            diff: 2,                 // 0 = Легкая, 1 = Средняя, 2 = Сложная
+            minTime: 240,            // Случайная выдержка от (сек)
+            maxTime: 260,            // Случайная выдержка до (сек)
+            diffWaitSec: 10,         // Ожидание перед выбором сложности (сек)
+            boardWaitSec: 10,        // Ожидание прогрузки стола и кусочков (сек)
+            exitWaitSec: 7,          // Ожидание появления кнопки "Выход" (сек)
             roundStartTime: 0,
             roundTargetTime: 0,
             roundTargetDuration: 0,
@@ -55,6 +58,16 @@
             solveTime: 0,
             status: 'Готов к запуску'
         };
+    }
+
+    function getTicketsBalance() {
+        const el = document.querySelector('.gwg-bal-item[data-i="tickets"] span');
+        return el ? (parseInt(el.innerText.trim(), 10) || 0) : 0;
+    }
+
+    function getCoinsBalance() {
+        const el = document.querySelector('.gw-user-balance') || document.querySelector('.gw-c-val');
+        return el ? (parseInt(el.innerText.replace(/[^\d]/g, ''), 10) || 0) : 0;
     }
 
     let lastSavedJson = '';
@@ -881,8 +894,21 @@
             return true;
         }
 
-        const favQuest = findWeeklyFavoriteQuest();
-        const hasPendingWeeklyOrGlobal = !!(
+        const doQuests = state.doQuests !== false;
+        const doGiveaways = state.doGiveaways !== false;
+
+        // Если оба пункта (Задачи и Розыгрыши) отключены галочками — ничего не делаем
+        if (!doQuests && !doGiveaways) {
+            if (state.dailyTasksActive) {
+                state.dailyTasksActive = false;
+                state.status = '⚠️ Включите галочку «Задачи» или «Розыгрыши»!';
+                saveState(state);
+            }
+            return false;
+        }
+
+        const favQuest = doQuests ? findWeeklyFavoriteQuest() : null;
+        const hasPendingWeeklyOrGlobal = doQuests && !!(
             favQuest ||
             document.querySelector('.gw-quests[data-type="weekly"] .q-b-get') ||
             document.querySelector('.gw-quests[data-type="global"] .q-b-get') ||
@@ -895,132 +921,141 @@
         const shouldRun = state.dailyTasksActive || (state.active && state.autoDailyBeforeFarm && (!state.dailyTasksDoneInSession || hasPendingWeeklyOrGlobal));
         if (!shouldRun) return false;
 
-        // 0. Если открыта модалка подтверждения замены еженедельного задания — подтверждаем
-        const refreshAcceptBtn = document.querySelector('.refresh-task-accept');
-        if (refreshAcceptBtn && refreshAcceptBtn.offsetParent !== null) {
-            if (now - lastDailyActionAt < 1200) return true;
-            lastDailyActionAt = now;
-            state.status = '🔄 Подтверждаем замену выполненного задания...';
-            saveState(state);
-            refreshAcceptBtn.click();
-            return true;
-        }
+        if (doQuests) {
+            // 0. Если открыта модалка подтверждения замены еженедельного задания — подтверждаем
+            const refreshAcceptBtn = document.querySelector('.refresh-task-accept');
+            if (refreshAcceptBtn && refreshAcceptBtn.offsetParent !== null) {
+                if (now - lastDailyActionAt < 1200) return true;
+                lastDailyActionAt = now;
+                state.status = '🔄 Подтверждаем замену выполненного задания...';
+                saveState(state);
+                refreshAcceptBtn.click();
+                return true;
+            }
 
-        // 1. Вкладка «Ежедневные Задания» (data-quests="daily")
-        const dailyClaimBtn = document.querySelector('.gw-quests[data-type="daily"] .q-b-get:not([data-type="quest_dl_capcha"])');
-        if (dailyClaimBtn) {
-            const dailyTab = document.querySelector('.gw-context-menu div[data-quests="daily"]');
-            if (dailyTab && !dailyTab.classList.contains('gw-page-active')) dailyTab.click();
-            if (now - lastDailyActionAt < 2500) return true;
-            lastDailyActionAt = now;
-            const qTitle = dailyClaimBtn.closest('.gw-quest-holder')?.querySelector('.gw-quest-info span')?.innerText?.trim() || 'Ежедневное задание';
-            state.status = `🎁 Забираем: «${qTitle}»...`;
-            saveState(state);
-            dailyClaimBtn.click();
-            return true;
-        }
+            // 1. Вкладка «Ежедневные Задания» (data-quests="daily")
+            const dailyClaimBtn = document.querySelector('.gw-quests[data-type="daily"] .q-b-get:not([data-type="quest_dl_capcha"])');
+            if (dailyClaimBtn) {
+                const dailyTab = document.querySelector('.gw-context-menu div[data-quests="daily"]');
+                if (dailyTab && !dailyTab.classList.contains('gw-page-active')) dailyTab.click();
+                if (now - lastDailyActionAt < 2500) return true;
+                lastDailyActionAt = now;
+                const qTitle = dailyClaimBtn.closest('.gw-quest-holder')?.querySelector('.gw-quest-info span')?.innerText?.trim() || 'Ежедневное задание';
+                state.status = `🎁 Забираем: «${qTitle}»...`;
+                saveState(state);
+                dailyClaimBtn.click();
+                return true;
+            }
 
-        const capQuestBtn = document.querySelector('.gw-quests[data-type="daily"] .q-b-get[data-type="quest_dl_capcha"]');
-        if (capQuestBtn) {
-            const dailyTab = document.querySelector('.gw-context-menu div[data-quests="daily"]');
-            if (dailyTab && !dailyTab.classList.contains('gw-page-active')) dailyTab.click();
-            if (now - lastDailyActionAt < 3500) return true;
-            lastDailyActionAt = now;
-            state.status = '🎁 Открываем квест «Пройдите проверку капчи» (+300 монет)...';
-            saveState(state);
-            capQuestBtn.click();
-            return true;
-        }
+            const capQuestBtn = document.querySelector('.gw-quests[data-type="daily"] .q-b-get[data-type="quest_dl_capcha"]');
+            if (capQuestBtn) {
+                const dailyTab = document.querySelector('.gw-context-menu div[data-quests="daily"]');
+                if (dailyTab && !dailyTab.classList.contains('gw-page-active')) dailyTab.click();
+                if (now - lastDailyActionAt < 3500) return true;
+                lastDailyActionAt = now;
+                state.status = '🎁 Открываем квест «Пройдите проверку капчи» (+300 монет)...';
+                saveState(state);
+                capQuestBtn.click();
+                return true;
+            }
 
-        // 2. Вкладка «Еженедельные Задания» (data-quests="weekly") — сбор наград, авто-квест с избранным и замена выполненных задач
-        if (favQuest) {
-            runWeeklyFavoriteQuest(favQuest);
-            return true;
-        }
+            // 2. Вкладка «Еженедельные Задания» (data-quests="weekly") — сбор наград, авто-квест с избранным и замена выполненных задач
+            if (favQuest) {
+                runWeeklyFavoriteQuest(favQuest);
+                return true;
+            }
 
-        const weeklyClaimBtn = document.querySelector('.gw-quests[data-type="weekly"] .q-b-get');
-        if (weeklyClaimBtn) {
-            const weeklyTab = document.querySelector('.gw-context-menu div[data-quests="weekly"]');
-            if (weeklyTab && !weeklyTab.classList.contains('gw-page-active')) weeklyTab.click();
-            if (now - lastDailyActionAt < 2500) return true;
-            lastDailyActionAt = now;
-            const qTitle = weeklyClaimBtn.closest('.gw-quest-holder')?.querySelector('.gw-quest-info span')?.innerText?.trim() || 'Еженедельное задание';
-            state.status = `🎁 Забираем еженедельное задание: «${qTitle}»...`;
-            saveState(state);
-            weeklyClaimBtn.click();
-            return true;
-        }
-
-        const refreshCountEl = document.querySelector('#balanceTrefresh b');
-        const refreshAvailable = refreshCountEl ? (parseInt(refreshCountEl.innerText.trim()) || 0) : 0;
-        if (refreshAvailable > 0) {
-            const completedWeeklyRefreshBtn = Array.from(
-                document.querySelectorAll('.gw-quests[data-type="weekly"] .gw-quest-progress')
-            ).find(prog => prog.querySelector('.q-b-done:not(.refresh-task)') && prog.querySelector('.refresh-task'))
-             ?.querySelector('.refresh-task');
-
-            if (completedWeeklyRefreshBtn) {
+            const weeklyClaimBtn = document.querySelector('.gw-quests[data-type="weekly"] .q-b-get');
+            if (weeklyClaimBtn) {
                 const weeklyTab = document.querySelector('.gw-context-menu div[data-quests="weekly"]');
                 if (weeklyTab && !weeklyTab.classList.contains('gw-page-active')) weeklyTab.click();
                 if (now - lastDailyActionAt < 2500) return true;
                 lastDailyActionAt = now;
-                state.status = `🔄 Заменяем выполненное еженедельное задание (доступно замен: ${refreshAvailable})...`;
+                const qTitle = weeklyClaimBtn.closest('.gw-quest-holder')?.querySelector('.gw-quest-info span')?.innerText?.trim() || 'Еженедельное задание';
+                state.status = `🎁 Забираем еженедельное задание: «${qTitle}»...`;
                 saveState(state);
-                completedWeeklyRefreshBtn.click();
-                setTimeout(() => {
-                    const acceptBtn = document.querySelector('.refresh-task-accept');
-                    if (acceptBtn) acceptBtn.click();
-                }, 400);
+                weeklyClaimBtn.click();
+                return true;
+            }
+
+            const refreshCountEl = document.querySelector('#balanceTrefresh b');
+            const refreshAvailable = refreshCountEl ? (parseInt(refreshCountEl.innerText.trim()) || 0) : 0;
+            if (refreshAvailable > 0) {
+                const completedWeeklyRefreshBtn = Array.from(
+                    document.querySelectorAll('.gw-quests[data-type="weekly"] .gw-quest-progress')
+                ).find(prog => prog.querySelector('.q-b-done:not(.refresh-task)') && prog.querySelector('.refresh-task'))
+                 ?.querySelector('.refresh-task');
+
+                if (completedWeeklyRefreshBtn) {
+                    const weeklyTab = document.querySelector('.gw-context-menu div[data-quests="weekly"]');
+                    if (weeklyTab && !weeklyTab.classList.contains('gw-page-active')) weeklyTab.click();
+                    if (now - lastDailyActionAt < 2500) return true;
+                    lastDailyActionAt = now;
+                    state.status = `🔄 Заменяем выполненное еженедельное задание (доступно замен: ${refreshAvailable})...`;
+                    saveState(state);
+                    completedWeeklyRefreshBtn.click();
+                    setTimeout(() => {
+                        const acceptBtn = document.querySelector('.refresh-task-accept');
+                        if (acceptBtn) acceptBtn.click();
+                    }, 400);
+                    return true;
+                }
+            }
+
+            // 3. Вкладка «Постоянные Задачи» (data-quests="global")
+            const globalClaimBtn = document.querySelector('.gw-quests[data-type="global"] .q-b-get');
+            if (globalClaimBtn) {
+                const globalTab = document.querySelector('.gw-context-menu div[data-quests="global"]');
+                if (globalTab && !globalTab.classList.contains('gw-page-active')) globalTab.click();
+                if (now - lastDailyActionAt < 2500) return true;
+                lastDailyActionAt = now;
+                const qTitle = globalClaimBtn.closest('.gw-quest-holder')?.querySelector('.gw-quest-info span')?.innerText?.trim() || 'Постоянная задача';
+                state.status = `🎁 Забираем постоянную задачу: «${qTitle}»...`;
+                saveState(state);
+                globalClaimBtn.click();
                 return true;
             }
         }
 
-        // 3. Вкладка «Постоянные Задачи» (data-quests="global")
-        const globalClaimBtn = document.querySelector('.gw-quests[data-type="global"] .q-b-get');
-        if (globalClaimBtn) {
-            const globalTab = document.querySelector('.gw-context-menu div[data-quests="global"]');
-            if (globalTab && !globalTab.classList.contains('gw-page-active')) globalTab.click();
-            if (now - lastDailyActionAt < 2500) return true;
-            lastDailyActionAt = now;
-            const qTitle = globalClaimBtn.closest('.gw-quest-holder')?.querySelector('.gw-quest-info span')?.innerText?.trim() || 'Постоянная задача';
-            state.status = `🎁 Забираем постоянную задачу: «${qTitle}»...`;
-            saveState(state);
-            globalClaimBtn.click();
-            return true;
-        }
-
         // 4. Вступление в Ежедневный и Еженедельный Розыгрыши (за 1 билет)
-        const ticketsEl = document.querySelector('.gwg-bal-item[data-i="tickets"] span');
-        const tickets = ticketsEl ? (parseInt(ticketsEl.innerText.trim()) || 0) : 0;
-        const unjoinedBtn = document.querySelector('.gw-draw-v2-card:not(.gw-draw-joined) .gw-draw-join-btn');
+        if (doGiveaways) {
+            const tickets = getTicketsBalance();
+            const unjoinedBtn = document.querySelector('.gw-draw-v2-card:not(.gw-draw-joined) .gw-draw-join-btn');
 
-        if (unjoinedBtn && tickets >= 1) {
-            const gwPageContent = document.querySelector('.giveaways-content[data-page="giveaway"]');
-            if (gwPageContent && !gwPageContent.classList.contains('gc-active')) {
-                if (typeof window.changePage === 'function') {
-                    window.changePage('giveaway');
-                } else {
-                    const gwNav = document.querySelector('.gw-page[data-page="giveaway"]');
-                    if (gwNav) gwNav.click();
+            if (unjoinedBtn && tickets >= 1) {
+                const gwPageContent = document.querySelector('.giveaways-content[data-page="giveaway"]');
+                if (gwPageContent && !gwPageContent.classList.contains('gc-active')) {
+                    if (typeof window.changePage === 'function') {
+                        window.changePage('giveaway');
+                    } else {
+                        const gwNav = document.querySelector('.gw-page[data-page="giveaway"]');
+                        if (gwNav) gwNav.click();
+                    }
                 }
+
+                if (now - lastDailyActionAt < 3500) return true;
+                lastDailyActionAt = now;
+
+                const card = unjoinedBtn.closest('.gw-draw-v2-card');
+                const title = card?.querySelector('.gw-draw-v2-title')?.innerText?.trim() || 'Розыгрыш';
+                state.status = `🎟 Вступаем в «${title}» (1 билет)...`;
+                saveState(state);
+                unjoinedBtn.click();
+                return true;
             }
-
-            if (now - lastDailyActionAt < 3500) return true;
-            lastDailyActionAt = now;
-
-            const card = unjoinedBtn.closest('.gw-draw-v2-card');
-            const title = card?.querySelector('.gw-draw-v2-title')?.innerText?.trim() || 'Розыгрыш';
-            state.status = `🎟 Вступаем в «${title}» (1 билет)...`;
-            saveState(state);
-            unjoinedBtn.click();
-            return true;
         }
 
-        // 5. Все ежедневные задания и розыгрыши выполнены!
+        // 5. Все выбранные задачи/розыгрыши выполнены!
         state.dailyTasksDoneInSession = true;
         if (state.dailyTasksActive && !state.active) {
             state.dailyTasksActive = false;
-            state.status = '✅ Ежедневные задания собраны, в розыгрыши вступили!';
+            if (doQuests && doGiveaways) {
+                state.status = '✅ Задания собраны, в розыгрыши вступили!';
+            } else if (doQuests) {
+                state.status = '✅ Все доступные задания собраны!';
+            } else {
+                state.status = '✅ Вступление в розыгрыши выполнено!';
+            }
             saveState(state);
             return false;
         }
@@ -1062,18 +1097,38 @@
 
         if (!state.active) return;
 
-        // 1. Завершение всех игр в очереди
-        if (state.completed >= state.totalGames) {
-            state.active = false;
-            state.status = '🎉 Все запланированные игры завершены!';
-            saveState(state);
-            return;
+        const now = Date.now();
+        const modalAccept = document.querySelector('.new-game-accept');
+
+        // 1. Проверка завершения очереди игр или окончания билетов (когда мы в лобби)
+        if (!canvas && !modalAccept) {
+            const ticketsEl = document.querySelector('.gwg-bal-item[data-i="tickets"] span');
+            const currentTickets = ticketsEl ? (parseInt(ticketsEl.innerText.trim(), 10) || 0) : null;
+
+            if (state.useAllTickets) {
+                if (currentTickets !== null && currentTickets <= 0) {
+                    state.active = false;
+                    state.status = `🎉 Все билеты израсходованы! Собрано игр: ${state.completed}`;
+                    saveState(state);
+                    return;
+                }
+            } else {
+                if (state.completed >= state.totalGames) {
+                    state.active = false;
+                    state.status = `🎉 Все запланированные игры завершены (${state.completed}/${state.totalGames})!`;
+                    saveState(state);
+                    return;
+                }
+                if (currentTickets !== null && currentTickets <= 0) {
+                    state.active = false;
+                    state.status = `🎟 Закончились билеты! Собрано игр: ${state.completed}/${state.totalGames}`;
+                    saveState(state);
+                    return;
+                }
+            }
         }
 
-        const now = Date.now();
-
         // 2. Модалка "Новая игра" -> кликаем "УВЕРЕН" (не чаще 1 раза в 4 сек, только если холст ещё не открыт)
-        const modalAccept = document.querySelector('.new-game-accept');
         if (!canvas && modalAccept && modalAccept.offsetParent !== null && !modalAccept.classList.contains('disabled')) {
             if (now - lastAcceptClickAt < 4000) return;
             lastAcceptClickAt = now;
@@ -1132,11 +1187,14 @@
 
         // Если выход уже нажат — ждём нативную перезагрузку страницы от игры (скрипт ничего не трогает)
         if (state.exitClicked) {
-            state.status = '⏳ Выход нажат. Ожидаем авто-перезагрузку страницы от игры...';
+            state.status = '⏳ Выход нажат. Ожидаем возврат в лобби...';
             return;
         }
 
         const screenState = getGameScreenState();
+        const gameProgressText = state.useAllTickets
+            ? `#${state.completed + 1} (билетов: ${getTicketsBalance()})`
+            : `${state.completed + 1}/${state.totalGames}`;
 
         // 4. Пазл собран (или экран завершения раунда) -> выжидаем появление кнопки "Выход" и нажимаем её штатно
         if (state.solvingStarted || screenState === 'GAME_END') {
@@ -1144,7 +1202,6 @@
                 state.solvingStarted = true;
                 state.solveTime = now;
             }
-            // Если по какой-то причине p.menu.gameEnd еще не выставлен — дожимаем сборку
             if (p && p.menu && !p.menu.gameEnd) {
                 solvePuzzle();
             }
@@ -1154,7 +1211,7 @@
 
             if (elapsed < waitMs) {
                 const left = Math.ceil((waitMs - elapsed) / 1000);
-                state.status = `🏆 Экран победы! Ожидание кнопки "Выход": ${left}с...`;
+                state.status = `🏆 Экран победы! Выход через: ${left}с...`;
                 saveState(state);
                 return;
             }
@@ -1173,11 +1230,21 @@
             state.roundStartTime = 0;
             state.roundTargetTime = 0;
 
-            if (state.completed < state.totalGames) {
-                state.active = true;
+            if (state.useAllTickets) {
+                const remTickets = getTicketsBalance();
+                if (remTickets > 0) {
+                    state.active = true;
+                } else {
+                    state.active = false;
+                    state.status = `🎉 Все билеты израсходованы! Собрано игр: ${state.completed}`;
+                }
             } else {
-                state.active = false;
-                state.status = '🎉 Все запланированные игры завершены!';
+                if (state.completed < state.totalGames) {
+                    state.active = true;
+                } else {
+                    state.active = false;
+                    state.status = `🎉 Все запланированные игры завершены (${state.completed}/${state.totalGames})!`;
+                }
             }
             saveState(state);
 
@@ -1213,14 +1280,14 @@
             const waitMs = (state.diffWaitSec || 10) * 1000;
             if (!state.diffWaitEndTime) {
                 state.diffWaitEndTime = now + waitMs;
-                state.status = `🖥 Экран выбора сложности. Пауза (${state.diffWaitSec}с)...`;
+                state.status = `🖥 Выбор сложности. Пауза (${state.diffWaitSec}с)...`;
                 saveState(state);
                 return;
             }
 
             if (now < state.diffWaitEndTime) {
                 const left = Math.ceil((state.diffWaitEndTime - now) / 1000);
-                state.status = `🖥 Экран выбора сложности. Клик через: ${left}с...`;
+                state.status = `🖥 Выбор сложности. Клик через: ${left}с...`;
                 saveState(state);
                 return;
             }
@@ -1228,7 +1295,7 @@
             const boardWaitMs = (state.boardWaitSec || 10) * 1000;
             state.diffSelected = true;
             state.boardWaitEndTime = now + boardWaitMs;
-            state.status = `Выбираем сложность (${state.completed + 1}/${state.totalGames})...`;
+            state.status = `Выбираем сложность (${gameProgressText})...`;
             saveState(state);
 
             triggerDifficulty(state.diff);
@@ -1298,7 +1365,7 @@
             state.roundTargetDuration = duration;
             state.roundStartTime = now;
             state.roundTargetTime = now + duration * 1000;
-            state.status = `Фарм запущен! Выдержка на таймере игры: ${duration}с`;
+            state.status = `Фарм запущен! Выдержка на таймере: ${duration}с`;
             saveState(state);
             return;
         }
@@ -1306,7 +1373,7 @@
         // 12. Обратный отсчет СТРОГО ПО РЕАЛЬНОМУ ТАЙМЕРУ ИГРЫ (gameTimer)
         if (gameTimer < state.roundTargetDuration) {
             const remaining = Math.max(0, state.roundTargetDuration - gameTimer);
-            state.status = `Игра (${state.completed + 1}/${state.totalGames}). Сборка через: ${remaining}с (в игре: ${gameTimer}/${state.roundTargetDuration}с)`;
+            state.status = `Игра ${gameProgressText} • Сборка через: ${remaining}с (${gameTimer}/${state.roundTargetDuration}с)`;
             saveState(state);
             return;
         }
@@ -1326,15 +1393,251 @@
     }, 1000);
 
     // ==========================================
-    // ПЛАВАЮЩИЙ И ПЕРЕТАСКИВАЕМЫЙ UI ВИДЖЕТ
+    // ПЛАВАЮЩИЙ И ПЕРЕТАСКИВАЕМЫЙ UI ВИДЖЕТ (v1.3.0)
     // ==========================================
+    function injectStyles() {
+        if (document.getElementById('af-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'af-styles';
+        style.textContent = `
+            #af-widget {
+                position: fixed;
+                z-index: 9999999;
+                width: 340px;
+                background: linear-gradient(165deg, rgba(19, 21, 31, 0.97) 0%, rgba(12, 14, 22, 0.98) 100%);
+                border: 1px solid rgba(99, 102, 241, 0.45);
+                border-radius: 14px;
+                padding: 12px 14px;
+                color: #f3f4f6;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+                font-size: 12px;
+                box-shadow: 0 14px 40px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+                backdrop-filter: blur(12px);
+                box-sizing: border-box;
+                transition: border-color 0.2s ease;
+            }
+            #af-widget * {
+                box-sizing: border-box;
+            }
+            #af-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding-bottom: 8px;
+                margin-bottom: 10px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+                cursor: move;
+                user-select: none;
+            }
+            .af-brand {
+                display: flex;
+                align-items: center;
+                gap: 7px;
+                font-weight: 700;
+                font-size: 13px;
+                color: #fff;
+                letter-spacing: 0.2px;
+            }
+            .af-ver {
+                font-size: 10px;
+                font-weight: 600;
+                padding: 2px 6px;
+                border-radius: 999px;
+                background: rgba(99, 102, 241, 0.2);
+                color: #818cf8;
+                border: 1px solid rgba(99, 102, 241, 0.35);
+            }
+            #af-toggle {
+                background: rgba(255, 255, 255, 0.06);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                color: #9ca3af;
+                font-size: 11px;
+                border-radius: 6px;
+                padding: 2px 8px;
+                cursor: pointer;
+                transition: all 0.15s ease;
+            }
+            #af-toggle:hover {
+                background: rgba(255, 255, 255, 0.12);
+                color: #fff;
+            }
+            .af-stats-row {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 6px;
+                margin-bottom: 8px;
+            }
+            .af-stat-pill {
+                background: rgba(255, 255, 255, 0.035);
+                border: 1px solid rgba(255, 255, 255, 0.07);
+                border-radius: 8px;
+                padding: 5px 6px;
+                text-align: center;
+                font-size: 11px;
+                color: #d1d5db;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            .af-stat-pill b {
+                color: #fff;
+                font-weight: 700;
+            }
+            #af-engine-badge {
+                margin-bottom: 10px;
+                padding: 5px 8px;
+                background: rgba(15, 17, 26, 0.9);
+                border-radius: 8px;
+                font-size: 11px;
+                font-weight: 500;
+                text-align: center;
+                color: #9ca3af;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                transition: all 0.2s ease;
+            }
+            .af-card {
+                background: rgba(255, 255, 255, 0.03);
+                border: 1px solid rgba(255, 255, 255, 0.07);
+                border-radius: 10px;
+                padding: 9px 10px;
+                margin-bottom: 9px;
+            }
+            .af-card-title {
+                font-size: 11px;
+                font-weight: 700;
+                color: #e5e7eb;
+                margin-bottom: 7px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+            }
+            .af-label {
+                display: block;
+                font-size: 11px;
+                color: #9ca3af;
+                margin-bottom: 4px;
+            }
+            .af-input, .af-select {
+                width: 100%;
+                background: #181b28;
+                color: #f9fafb;
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 7px;
+                padding: 5px 8px;
+                font-size: 12px;
+                outline: none;
+                transition: border-color 0.15s ease, opacity 0.15s ease;
+            }
+            .af-input:focus, .af-select:focus {
+                border-color: #6366f1;
+            }
+            .af-input:disabled {
+                opacity: 0.45;
+                cursor: not-allowed;
+            }
+            .af-row {
+                display: flex;
+                gap: 8px;
+                align-items: center;
+            }
+            .af-chip-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 6px;
+                margin-bottom: 7px;
+            }
+            .af-check-chip {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                padding: 5px 8px;
+                background: rgba(24, 27, 40, 0.85);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 7px;
+                font-size: 11px;
+                color: #d1d5db;
+                cursor: pointer;
+                user-select: none;
+                transition: all 0.15s ease;
+            }
+            .af-check-chip:hover {
+                border-color: rgba(99, 102, 241, 0.5);
+                color: #fff;
+            }
+            .af-check-chip input[type="checkbox"] {
+                accent-color: #6366f1;
+                cursor: pointer;
+                margin: 0;
+            }
+            .af-details {
+                margin-top: 6px;
+                border-top: 1px solid rgba(255, 255, 255, 0.06);
+                padding-top: 6px;
+            }
+            .af-details summary {
+                font-size: 11px;
+                color: #9ca3af;
+                cursor: pointer;
+                user-select: none;
+                list-style: none;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+            }
+            .af-details summary::-webkit-details-marker {
+                display: none;
+            }
+            .af-details summary:hover {
+                color: #e5e7eb;
+            }
+            .af-btn {
+                border: none;
+                border-radius: 8px;
+                padding: 8px 10px;
+                font-weight: 700;
+                font-size: 12px;
+                cursor: pointer;
+                color: #fff;
+                transition: filter 0.15s ease, transform 0.1s ease, opacity 0.15s ease;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 5px;
+            }
+            .af-btn:hover:not(:disabled) {
+                filter: brightness(1.1);
+            }
+            .af-btn:active:not(:disabled) {
+                transform: translateY(1px);
+            }
+            .af-btn:disabled {
+                opacity: 0.45;
+                cursor: not-allowed;
+            }
+            #af-status {
+                margin-bottom: 9px;
+                padding: 7px 9px;
+                background: #090b10;
+                border-radius: 8px;
+                color: #10b981;
+                font-size: 11px;
+                font-weight: 500;
+                text-align: center;
+                border: 1px solid rgba(16, 185, 129, 0.22);
+                min-height: 30px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                line-height: 1.35;
+            }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
     function makeDraggable(el, handle) {
         let isDragging = false;
         let startX = 0, startY = 0;
         let origLeft = 0, origTop = 0;
-
-        handle.style.cursor = 'move';
-        handle.style.userSelect = 'none';
 
         handle.addEventListener('mousedown', (e) => {
             if (e.target.id === 'af-toggle') return;
@@ -1374,9 +1677,10 @@
     }
 
     function createUI() {
+        injectStyles();
         const existingWidget = document.getElementById('af-widget');
         if (existingWidget) {
-            if (document.getElementById('af-daily-btn')) return;
+            if (document.getElementById('af-all-tickets')) return;
             existingWidget.remove();
         }
 
@@ -1393,91 +1697,123 @@
 
         const div = document.createElement('div');
         div.id = 'af-widget';
-        div.style.cssText = `
-            position: fixed;
-            ${savedPos.left ? `left: ${savedPos.left};` : `right: ${savedPos.right};`}
-            top: ${savedPos.top};
-            z-index: 9999999;
-            background: rgba(17, 18, 23, 0.95);
-            border: 2px solid #5865f2;
-            border-radius: 12px;
-            padding: 12px 14px;
-            color: #fff;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            font-size: 13px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.7);
-            backdrop-filter: blur(8px);
-            width: 320px;
-        `;
+        if (savedPos.left) {
+            div.style.left = savedPos.left;
+            div.style.right = 'auto';
+        } else {
+            div.style.right = savedPos.right;
+        }
+        div.style.top = savedPos.top;
 
         const curState = getState();
 
         div.innerHTML = `
-            <div id="af-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; cursor: move; border-bottom: 1px solid #333; padding-bottom: 6px;">
-                <div style="font-weight: bold; color: #5865f2; display: flex; align-items: center; gap: 6px;">
-                    <span>🧩 Full-Auto Farmer v1.2.0</span>
+            <div id="af-header">
+                <div class="af-brand">
+                    <span>🧩 AutoFarmer Pro</span>
+                    <span class="af-ver">v1.3.0</span>
                 </div>
-                <button id="af-toggle" style="background: none; border: none; color: #888; font-size: 11px; cursor: pointer;">[Скрыть]</button>
+                <button id="af-toggle">Свернуть</button>
             </div>
             <div id="af-body">
-                <div id="af-engine-badge" style="margin-bottom: 8px; padding: 4px 6px; background: #161720; border-radius: 6px; font-size: 11px; text-align: center; color: #aaa; border: 1px solid #2a2b38;">
-                    ⏳ Связь с игрой: ожидание...
+                <div class="af-stats-row">
+                    <div class="af-stat-pill" title="Доступно билетов">🎟 Билеты: <b id="af-stat-tickets">0</b></div>
+                    <div class="af-stat-pill" title="Баланс монет">🪙 Монеты: <b id="af-stat-coins">0</b></div>
+                    <div class="af-stat-pill" title="Собрано игр за сессию">🏆 Игр: <b id="af-stat-games">0/0</b></div>
                 </div>
-                <div style="margin-bottom: 8px;">
-                    <label style="display:block; font-size:11px; color:#aaa; margin-bottom:3px;">Сложность:</label>
-                    <select id="af-diff" style="width: 100%; background: #252630; color: #fff; border: 1px solid #444; border-radius: 6px; padding: 5px;">
-                        <option value="2">🔴 Сложная (до 500s ➔ 1400 XP)</option>
-                        <option value="1">🟡 Средняя (до 300s ➔ 800 XP)</option>
-                        <option value="0">🟢 Легкая (до 80s ➔ 300 XP)</option>
-                    </select>
-                </div>
-                <div style="margin-bottom: 8px;">
-                    <label style="display:block; font-size:11px; color:#aaa; margin-bottom:3px;">Сколько игр собрать:</label>
-                    <input id="af-count" type="number" value="${curState.totalGames}" min="1" max="99" style="width: 95%; background: #252630; color: #fff; border: 1px solid #444; border-radius: 6px; padding: 5px;">
-                </div>
-                <div style="margin-bottom: 8px;">
-                    <label style="display:block; font-size:11px; color:#aaa; margin-bottom:3px;">Случайная выдержка перед сборкой (сек):</label>
-                    <div style="display: flex; gap: 6px; align-items: center;">
-                        <input id="af-min" type="number" value="${curState.minTime}" style="width: 45%; background: #252630; color: #fff; border: 1px solid #444; border-radius: 6px; padding: 5px; text-align: center;">
-                        <span style="color: #888;">—</span>
-                        <input id="af-max" type="number" value="${curState.maxTime}" style="width: 45%; background: #252630; color: #fff; border: 1px solid #444; border-radius: 6px; padding: 5px; text-align: center;">
+                <div id="af-engine-badge">⏳ Связь с игрой: ожидание...</div>
+
+                <div class="af-card">
+                    <div class="af-card-title">
+                        <span>🎮 Настройки Puzzle Box</span>
                     </div>
-                </div>
-                <div style="margin-bottom: 9px; padding: 6px; background: #20212b; border-radius: 6px;">
-                    <div style="margin-bottom: 5px;">
-                        <label style="display:block; font-size:11px; color:#aaa; margin-bottom:2px;">Пауза до выбора сложности (сек):</label>
-                        <input id="af-diff-wait" type="number" value="${curState.diffWaitSec || 10}" min="0" max="60" style="width: 95%; background: #252630; color: #fff; border: 1px solid #444; border-radius: 6px; padding: 4px;">
+                    <div style="margin-bottom: 7px;">
+                        <label class="af-label">Сложность:</label>
+                        <select id="af-diff" class="af-select">
+                            <option value="2">🔴 Сложная (до 500s ➔ 1400 XP)</option>
+                            <option value="1">🟡 Средняя (до 300s ➔ 800 XP)</option>
+                            <option value="0">🟢 Легкая (до 80s ➔ 300 XP)</option>
+                        </select>
                     </div>
-                    <div style="margin-bottom: 5px;">
-                        <label style="display:block; font-size:11px; color:#aaa; margin-bottom:2px;">Пауза на прогрузку стола (сек):</label>
-                        <input id="af-board-wait" type="number" value="${curState.boardWaitSec || 10}" min="0" max="60" style="width: 95%; background: #252630; color: #fff; border: 1px solid #444; border-radius: 6px; padding: 4px;">
+                    <div style="margin-bottom: 7px;">
+                        <label class="af-label">Количество игр:</label>
+                        <div class="af-row">
+                            <input id="af-count" class="af-input" type="number" value="${curState.totalGames}" min="1" max="999" style="width: 90px; text-align: center;" ${curState.useAllTickets ? 'disabled' : ''}>
+                            <label class="af-check-chip" style="flex: 1; justify-content: center;" title="Запускать игры подряд, пока не закончатся все билеты">
+                                <input id="af-all-tickets" type="checkbox" ${curState.useAllTickets ? 'checked' : ''}>
+                                <span>🎟 На все билеты</span>
+                            </label>
+                        </div>
                     </div>
                     <div>
-                        <label style="display:block; font-size:11px; color:#aaa; margin-bottom:2px;">Пауза перед выходом (сек):</label>
-                        <input id="af-exit-wait" type="number" value="${curState.exitWaitSec || 7}" min="1" max="60" style="width: 95%; background: #252630; color: #fff; border: 1px solid #444; border-radius: 6px; padding: 4px;">
+                        <label class="af-label">Выдержка перед сборкой (сек):</label>
+                        <div class="af-row">
+                            <input id="af-min" class="af-input" type="number" value="${curState.minTime}" style="text-align: center;">
+                            <span style="color: #6b7280;">—</span>
+                            <input id="af-max" class="af-input" type="number" value="${curState.maxTime}" style="text-align: center;">
+                        </div>
                     </div>
+                    <details class="af-details">
+                        <summary>
+                            <span>⚙️ Тайминги и паузы</span>
+                            <span id="af-pauses-summary" style="font-size: 10px; color: #6b7280;">${curState.diffWaitSec || 10}с / ${curState.boardWaitSec || 10}с / ${curState.exitWaitSec || 7}с ▾</span>
+                        </summary>
+                        <div style="margin-top: 7px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;">
+                            <div>
+                                <label class="af-label" style="font-size:10px;">До выбора (с)</label>
+                                <input id="af-diff-wait" class="af-input" type="number" value="${curState.diffWaitSec || 10}" min="0" max="60" style="text-align: center; padding: 4px;">
+                            </div>
+                            <div>
+                                <label class="af-label" style="font-size:10px;">Стол (с)</label>
+                                <input id="af-board-wait" class="af-input" type="number" value="${curState.boardWaitSec || 10}" min="0" max="60" style="text-align: center; padding: 4px;">
+                            </div>
+                            <div>
+                                <label class="af-label" style="font-size:10px;">Выход (с)</label>
+                                <input id="af-exit-wait" class="af-input" type="number" value="${curState.exitWaitSec || 7}" min="1" max="60" style="text-align: center; padding: 4px;">
+                            </div>
+                        </div>
+                    </details>
                 </div>
-                <div style="margin-bottom: 9px; padding: 7px 8px; background: #191b26; border: 1px solid #323652; border-radius: 6px;">
-                    <div style="font-size: 11px; font-weight: bold; color: #ffca28; margin-bottom: 5px;">🎁 Ежедневные задачи и Розыгрыши</div>
-                    <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #ccc; cursor: pointer; margin-bottom: 6px;">
-                        <input id="af-auto-daily" type="checkbox" ${curState.autoDailyBeforeFarm !== false ? 'checked' : ''} style="cursor: pointer;">
-                        <span>Выполнять автоматически перед фармом</span>
-                    </label>
-                    <div style="margin-bottom: 6px;">
-                        <input id="af-gemini-key" type="password" placeholder="Gemini API Key (опционально для авто-капчи)" value="${curState.geminiApiKey || ''}" style="width: 95%; background: #252630; color: #fff; border: 1px solid #444; border-radius: 5px; padding: 4px 6px; font-size: 11px;">
+
+                <div class="af-card">
+                    <div class="af-card-title">
+                        <span style="color: #fbbf24;">🎁 Задачи и Розыгрыши</span>
+                        <label style="display: flex; align-items: center; gap: 4px; font-size: 10px; font-weight: 500; color: #9ca3af; cursor: pointer;" title="Автоматически проверять выбранные пункты перед стартом фарма и между играми">
+                            <input id="af-auto-daily" type="checkbox" ${curState.autoDailyBeforeFarm !== false ? 'checked' : ''} style="accent-color: #fbbf24; cursor: pointer; margin: 0;">
+                            <span>Авто перед фармом</span>
+                        </label>
                     </div>
-                    <button id="af-daily-btn" style="width: 100%; padding: 6px; border: none; border-radius: 5px; font-weight: bold; font-size: 11px; cursor: pointer; background: ${curState.dailyTasksActive ? '#ff9800' : '#7c4dff'}; color: #fff;">
-                        ${curState.dailyTasksActive ? '⏳ Выполняем задачи/розыгрыши...' : '🎁 Собрать задачи и вступить в розыгрыши'}
+                    <div class="af-chip-grid">
+                        <label class="af-check-chip" title="Собирать Ежедневные, Еженедельные (с автозаменой и 30 в избранное) и Постоянные задачи">
+                            <input id="af-do-quests" type="checkbox" ${curState.doQuests !== false ? 'checked' : ''}>
+                            <span>📋 Задачи</span>
+                        </label>
+                        <label class="af-check-chip" title="Вступать в Ежедневный и Еженедельный розыгрыши за 1 билет">
+                            <input id="af-do-giveaways" type="checkbox" ${curState.doGiveaways !== false ? 'checked' : ''}>
+                            <span>🎟 Розыгрыши</span>
+                        </label>
+                    </div>
+                    <details class="af-details" style="margin-top: 0; border-top: none; padding-top: 0; margin-bottom: 7px;">
+                        <summary style="font-size: 10px;">
+                            <span>🤖 ИИ-капча (Gemini API Key)</span>
+                            <span>▾</span>
+                        </summary>
+                        <div style="margin-top: 5px;">
+                            <input id="af-gemini-key" class="af-input" type="password" placeholder="Вставьте ключ Gemini API (необязательно)" value="${curState.geminiApiKey || ''}" style="font-size: 11px; padding: 4px 7px;">
+                        </div>
+                    </details>
+                    <button id="af-daily-btn" class="af-btn" style="width: 100%; padding: 6px 8px; font-size: 11px; background: #6366f1;">
+                        🎁 Собрать задачи и розыгрыши
                     </button>
                 </div>
-                <div id="af-status" style="margin-bottom: 10px; padding: 8px; background: #0c0d12; border-radius: 6px; color: #00e676; font-size: 11px; text-align: center; border: 1px solid #222; min-height: 28px; display: flex; align-items: center; justify-content: center;">
-                    ${curState.status}
-                </div>
-                <div style="display: flex; gap: 8px;">
-                    <button id="af-action-btn" style="flex: 1; padding: 8px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; background: ${curState.active ? '#ff4b4b' : '#00c853'}; color: #fff;">
+
+                <div id="af-status">${curState.status}</div>
+
+                <div class="af-row">
+                    <button id="af-action-btn" class="af-btn" style="flex: 1.2; background: ${curState.active ? '#ef4444' : '#10b981'};">
                         ${curState.active ? '⏸ Стоп' : '▶ Старт'}
                     </button>
-                    <button id="af-solve-btn" style="flex: 1; padding: 8px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; background: #2979ff; color: #fff;">
+                    <button id="af-solve-btn" class="af-btn" style="flex: 1; background: #3b82f6;">
                         ⚡ Собрать
                     </button>
                 </div>
@@ -1490,11 +1826,15 @@
 
         const diffEl = div.querySelector('#af-diff');
         const countEl = div.querySelector('#af-count');
+        const allTicketsEl = div.querySelector('#af-all-tickets');
         const minEl = div.querySelector('#af-min');
         const maxEl = div.querySelector('#af-max');
         const diffWaitEl = div.querySelector('#af-diff-wait');
         const boardWaitEl = div.querySelector('#af-board-wait');
         const exitWaitEl = div.querySelector('#af-exit-wait');
+        const pausesSummaryEl = div.querySelector('#af-pauses-summary');
+        const doQuestsEl = div.querySelector('#af-do-quests');
+        const doGiveawaysEl = div.querySelector('#af-do-giveaways');
         const autoDailyEl = div.querySelector('#af-auto-daily');
         const geminiKeyEl = div.querySelector('#af-gemini-key');
         const dailyBtn = div.querySelector('#af-daily-btn');
@@ -1523,12 +1863,27 @@
             saveState(st);
         });
 
+        allTicketsEl.addEventListener('change', () => {
+            const st = getState();
+            st.useAllTickets = !!allTicketsEl.checked;
+            countEl.disabled = st.useAllTickets;
+            saveState(st);
+            updateUI(st);
+        });
+
+        const updatePausesSummary = (st) => {
+            if (pausesSummaryEl) {
+                pausesSummaryEl.innerText = `${st.diffWaitSec || 10}с / ${st.boardWaitSec || 10}с / ${st.exitWaitSec || 7}с ▾`;
+            }
+        };
+
         const bindInput = (el, prop, fallback) => {
             ['input', 'change'].forEach(ev => {
                 el.addEventListener(ev, () => {
                     const st = getState();
                     st[prop] = parseInt(el.value) || fallback;
                     saveState(st);
+                    updatePausesSummary(st);
                 });
             });
         };
@@ -1538,6 +1893,20 @@
         bindInput(diffWaitEl, 'diffWaitSec', 10);
         bindInput(boardWaitEl, 'boardWaitSec', 10);
         bindInput(exitWaitEl, 'exitWaitSec', 7);
+
+        doQuestsEl.addEventListener('change', () => {
+            const st = getState();
+            st.doQuests = !!doQuestsEl.checked;
+            saveState(st);
+            updateUI(st);
+        });
+
+        doGiveawaysEl.addEventListener('change', () => {
+            const st = getState();
+            st.doGiveaways = !!doGiveawaysEl.checked;
+            saveState(st);
+            updateUI(st);
+        });
 
         autoDailyEl.addEventListener('change', () => {
             const st = getState();
@@ -1555,12 +1924,13 @@
 
         dailyBtn.addEventListener('click', () => {
             const st = getState();
+            if (!st.doQuests && !st.doGiveaways) return;
             st.dailyTasksActive = !st.dailyTasksActive;
             if (st.dailyTasksActive) {
                 st.dailyTasksDoneInSession = false;
-                st.status = '🎁 Запуск сбора ежедневных заданий и розыгрышей...';
+                st.status = '🎁 Запуск выбранных задач / розыгрышей...';
             } else {
-                st.status = 'Сбор ежедневных заданий остановлен.';
+                st.status = 'Выполнение задач/розыгрышей остановлено.';
             }
             saveState(st);
             updateUI(st);
@@ -1581,7 +1951,9 @@
                 st.roundTargetTime = 0;
                 st.solvingStarted = false;
                 st.exitClicked = false;
-                st.status = 'Автофарм запущен!';
+                st.status = st.useAllTickets
+                    ? `Автофарм запущен (на все билеты: ${getTicketsBalance()} шт.)!`
+                    : `Автофарм запущен (план: ${st.totalGames} игр)!`;
             } else {
                 st.dailyTasksActive = false;
                 st.status = 'Остановлено пользователем.';
@@ -1595,15 +1967,12 @@
             const p = getPuzzleInstance();
             const gameTime = (p && p.menu && typeof p.menu.time === 'number') ? p.menu.time : 0;
 
-            // Если игрок нажимает "Собрать" вручную слишком рано на Сложной сложности,
-            // предупреждаем, что сервер может выдать "Ошибка" и 0 XP из-за античита по времени!
             if (st.diff === 2 && gameTime < 90) {
                 const conf = confirm(`⚠️ Внимание!\nТекущее время игры: ${gameTime}с.\nДля Сложной сложности сервер начисляет 0 XP (Ошибка), если собрать пазл быстрее ~90 сек (античит сервера).\n\nВы действительно хотите собрать пазл сейчас?`);
                 if (!conf) return;
             }
 
             const now = Date.now();
-
             const ok = solvePuzzle();
             if (!ok) {
                 alert('Кусочки пазла еще не прогрузились на столе! Подождите пару секунд.');
@@ -1622,10 +1991,10 @@
         toggleBtn.addEventListener('click', () => {
             if (bodyEl.style.display === 'none') {
                 bodyEl.style.display = 'block';
-                toggleBtn.innerText = '[Скрыть]';
+                toggleBtn.innerText = 'Свернуть';
             } else {
                 bodyEl.style.display = 'none';
-                toggleBtn.innerText = '[Развернуть]';
+                toggleBtn.innerText = 'Развернуть';
             }
         });
     }
@@ -1635,16 +2004,50 @@
         const statusEl = document.getElementById('af-status');
         if (statusEl) statusEl.innerText = state.status;
 
+        const statTicketsEl = document.getElementById('af-stat-tickets');
+        if (statTicketsEl) statTicketsEl.innerText = String(getTicketsBalance());
+
+        const statCoinsEl = document.getElementById('af-stat-coins');
+        if (statCoinsEl) statCoinsEl.innerText = String(getCoinsBalance());
+
+        const statGamesEl = document.getElementById('af-stat-games');
+        if (statGamesEl) {
+            statGamesEl.innerText = state.useAllTickets
+                ? `${state.completed}/∞`
+                : `${state.completed}/${state.totalGames}`;
+        }
+
+        const countEl = document.getElementById('af-count');
+        if (countEl) {
+            countEl.disabled = !!state.useAllTickets;
+        }
+
         const actionBtn = document.getElementById('af-action-btn');
         if (actionBtn) {
             actionBtn.innerText = state.active ? '⏸ Стоп' : '▶ Старт';
-            actionBtn.style.background = state.active ? '#ff4b4b' : '#00c853';
+            actionBtn.style.background = state.active ? '#ef4444' : '#10b981';
         }
 
         const dailyBtn = document.getElementById('af-daily-btn');
         if (dailyBtn) {
-            dailyBtn.innerText = state.dailyTasksActive ? '⏳ Выполняем задачи/розыгрыши...' : '🎁 Собрать задачи и вступить в розыгрыши';
-            dailyBtn.style.background = state.dailyTasksActive ? '#ff9800' : '#7c4dff';
+            const doQ = state.doQuests !== false;
+            const doG = state.doGiveaways !== false;
+            dailyBtn.disabled = (!doQ && !doG);
+            if (state.dailyTasksActive) {
+                dailyBtn.innerText = '⏳ Выполняем... (Нажмите для отмены)';
+                dailyBtn.style.background = '#f59e0b';
+            } else {
+                dailyBtn.style.background = '#6366f1';
+                if (doQ && doG) {
+                    dailyBtn.innerText = '🎁 Собрать задачи и розыгрыши';
+                } else if (doQ) {
+                    dailyBtn.innerText = '📋 Собрать только задачи';
+                } else if (doG) {
+                    dailyBtn.innerText = '🎟 Вступить только в розыгрыши';
+                } else {
+                    dailyBtn.innerText = '🚫 Задачи и розыгрыши отключены';
+                }
+            }
         }
 
         const badgeEl = document.getElementById('af-engine-badge');
@@ -1664,14 +2067,14 @@
                 'GAME_END': '🏆 Экран: Пазл собран (Финал)'
             };
             if (screenState === 'PLAYING' || screenState === 'GAME_END') {
-                badgeEl.style.color = '#00e676';
-                badgeEl.style.borderColor = '#00e676';
+                badgeEl.style.color = '#10b981';
+                badgeEl.style.borderColor = 'rgba(16, 185, 129, 0.4)';
             } else if (p) {
-                badgeEl.style.color = '#ffeb3b';
-                badgeEl.style.borderColor = '#ffeb3b';
+                badgeEl.style.color = '#fbbf24';
+                badgeEl.style.borderColor = 'rgba(251, 191, 36, 0.4)';
             } else {
-                badgeEl.style.color = '#888';
-                badgeEl.style.borderColor = '#444';
+                badgeEl.style.color = '#9ca3af';
+                badgeEl.style.borderColor = 'rgba(255, 255, 255, 0.08)';
             }
             badgeEl.innerText = screenNames[screenState] || '⏳ Ожидание...';
         }
