@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SteamLvlUp Puzzle Box Full-Auto Farmer Pro
 // @namespace    https://steamlvlup.com/
-// @version      1.3.0
+// @version      1.3.1
 // @description  Полный автофарм PuzzleBox: игра по числу билетов, гибкий сбор задач и розыгрышей, помощник капчи и обновлённый UI
 // @author       Antigravity
 // @match        https://steamlvlup.com/giveaways*
@@ -1099,29 +1099,39 @@
 
         const now = Date.now();
         const modalAccept = document.querySelector('.new-game-accept');
+        const playBtn = document.querySelector('.new-game[data-game="puzzle"]');
 
-        // 1. Проверка завершения очереди игр или окончания билетов (когда мы в лобби)
+        // Считаем, что раунд УЖЕ оплачен или запускается, если:
+        // - сайт уже выставил window.ticketId или создал инстанс p5
+        // - только что была нажата кнопка "Уверен" (.new-game-accept) или "Играть" и холст еще монтируется
+        // - на кнопке "Играть" нет иконки билета (.fa-ticket-alt), т.е. игра уже начата ("Продолжить")
+        const requiresNewTicket = !!(playBtn && playBtn.querySelector('.fa-ticket-alt'));
+        const isRoundPaidOrLaunching = !!(
+            window.ticketId ||
+            getPuzzleInstance() ||
+            (now - lastAcceptClickAt < 15000) ||
+            (now - lastPlayClickAt < 6000) ||
+            (playBtn && !requiresNewTicket)
+        );
+
+        // 1. Проверка завершения очереди игр или окончания билетов (только когда мы в лобби и раунд ещё НЕ оплачен)
         if (!canvas && !modalAccept) {
-            const ticketsEl = document.querySelector('.gwg-bal-item[data-i="tickets"] span');
-            const currentTickets = ticketsEl ? (parseInt(ticketsEl.innerText.trim(), 10) || 0) : null;
+            if (!state.useAllTickets && state.completed >= state.totalGames) {
+                state.active = false;
+                state.status = `🎉 Все запланированные игры завершены (${state.completed}/${state.totalGames})!`;
+                saveState(state);
+                return;
+            }
 
-            if (state.useAllTickets) {
+            if (!isRoundPaidOrLaunching && requiresNewTicket) {
+                const ticketsEl = document.querySelector('.gwg-bal-item[data-i="tickets"] span');
+                const currentTickets = ticketsEl ? (parseInt(ticketsEl.innerText.trim(), 10) || 0) : null;
+
                 if (currentTickets !== null && currentTickets <= 0) {
                     state.active = false;
-                    state.status = `🎉 Все билеты израсходованы! Собрано игр: ${state.completed}`;
-                    saveState(state);
-                    return;
-                }
-            } else {
-                if (state.completed >= state.totalGames) {
-                    state.active = false;
-                    state.status = `🎉 Все запланированные игры завершены (${state.completed}/${state.totalGames})!`;
-                    saveState(state);
-                    return;
-                }
-                if (currentTickets !== null && currentTickets <= 0) {
-                    state.active = false;
-                    state.status = `🎟 Закончились билеты! Собрано игр: ${state.completed}/${state.totalGames}`;
+                    state.status = state.useAllTickets
+                        ? `🎉 Все билеты израсходованы! Собрано игр: ${state.completed}`
+                        : `🎟 Закончились билеты! Собрано игр: ${state.completed}/${state.totalGames}`;
                     saveState(state);
                     return;
                 }
@@ -1148,7 +1158,6 @@
         }
 
         // 3. Список игр -> кликаем "Играть" у Puzzle Box (не чаще 1 раза в 4 сек, только если холст ещё не открыт)
-        const playBtn = document.querySelector('.new-game[data-game="puzzle"]');
         if (!canvas && playBtn && playBtn.offsetParent !== null && !modalAccept) {
             if (now - lastPlayClickAt < 4000) return;
             lastPlayClickAt = now;
@@ -1680,7 +1689,7 @@
         injectStyles();
         const existingWidget = document.getElementById('af-widget');
         if (existingWidget) {
-            if (document.getElementById('af-all-tickets')) return;
+            if (existingWidget.dataset.ver === '1.3.1') return;
             existingWidget.remove();
         }
 
@@ -1697,6 +1706,7 @@
 
         const div = document.createElement('div');
         div.id = 'af-widget';
+        div.dataset.ver = '1.3.1';
         if (savedPos.left) {
             div.style.left = savedPos.left;
             div.style.right = 'auto';
@@ -1711,7 +1721,7 @@
             <div id="af-header">
                 <div class="af-brand">
                     <span>🧩 AutoFarmer Pro</span>
-                    <span class="af-ver">v1.3.0</span>
+                    <span class="af-ver">v1.3.1</span>
                 </div>
                 <button id="af-toggle">Свернуть</button>
             </div>
